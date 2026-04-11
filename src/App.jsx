@@ -1,3 +1,4 @@
+import * as XLSX from "xlsx";
 import { useState, useEffect } from "react";
 
 const API_CATALOG = [
@@ -64,6 +65,94 @@ function calcAll({products,labor,tc,markup}){
   const cuota = saldo/6.5;
   return {hwUSD,hwARS,laborARS,cost,total,margin:total-cost,pagoInicial,saldo,cuota,penalidad:cuota*36};
 }
+function downloadBOM({products, labor, tc, markup, form, calc, qnum}) {
+  const dateStr = new Date().toLocaleDateString("es-AR");
+
+  const bomRows = products.map((p, i) => ({
+    "Ítem":                   i + 1,
+    "SKU / Código":           p.sku,
+    "Descripción":            p.desc,
+    "Categoría":              p.cat || "",
+    "Cantidad":               p.qty,
+    "Precio USD (Black)":     p.unit_usd,
+    "Total USD":              +(p.qty * p.unit_usd).toFixed(2),
+    "Precio ARS (s/IVA)":    Math.round(p.unit_usd * tc * (1 + markup / 100)),
+    "Total ARS (s/IVA)":     Math.round(p.qty * p.unit_usd * tc * (1 + markup / 100)),
+    "Proveedor sugerido":     "Hikvision / HDN",
+    "Stock disponible":       "Consultar",
+    "Alternativa":            "",
+    "Cotización especial":    "",
+    "Notas preventa":         p.reason || "",
+  }));
+
+  bomRows.push({
+    "Ítem":                   products.length + 1,
+    "SKU / Código":           "MO-USS",
+    "Descripción":            `Mano de obra — ${labor.technicians} técnico(s) × ${labor.days} día(s)`,
+    "Categoría":              "Servicio",
+    "Cantidad":               1,
+    "Precio USD (Black)":     "",
+    "Total USD":              "",
+    "Precio ARS (s/IVA)":    Math.round(calc.laborARS * (1 + markup / 100)),
+    "Total ARS (s/IVA)":     Math.round(calc.laborARS * (1 + markup / 100)),
+    "Proveedor sugerido":     "USS",
+    "Stock disponible":       "Disponible",
+    "Alternativa":            "",
+    "Cotización especial":    "",
+    "Notas preventa":         `$260.000/día por técnico`,
+  });
+
+  const resumen = [
+    ["RESUMEN FINANCIERO — USS PREVENTA", ""],
+    ["", ""],
+    ["Cotización N°", qnum],
+    ["Fecha", dateStr],
+    ["Cliente", form.name || "—"],
+    ["CUIT", form.cuit || "—"],
+    ["Lugar de instalación", form.site || form.address || "—"],
+    ["Vendedor", form.seller || "—"],
+    ["Rubro", form.rubro],
+    ["Soluciones", form.sols.join(", ")],
+    ["", ""],
+    ["─── COSTOS ───", ""],
+    ["Hardware (USD)", +calc.hwUSD.toFixed(2)],
+    ["Tipo de cambio ($/USD)", tc],
+    ["Hardware (ARS)", Math.round(calc.hwARS)],
+    ["Mano de obra (ARS)", Math.round(calc.laborARS)],
+    ["Costo total (ARS)", Math.round(calc.cost)],
+    ["Markup (%)", markup + "%"],
+    ["", ""],
+    ["─── MODELO 1-SHOT ───", ""],
+    ["Total s/IVA", Math.round(calc.total)],
+    ["IVA 21%", Math.round(calc.total * 0.21)],
+    ["TOTAL CON IVA", Math.round(calc.total * 1.21)],
+    ["", ""],
+    ["─── MODELO COMODATO ───", ""],
+    ["Pago inicial (30%)", Math.round(calc.pagoInicial)],
+    ["Saldo a amortizar (70%)", Math.round(calc.saldo)],
+    ["Cuota mensual s/IVA (÷6.5)", Math.round(calc.cuota)],
+    ["Cuota mensual c/IVA", Math.round(calc.cuota * 1.21)],
+    ["Penalidad rescisión (36 cuotas)", Math.round(calc.penalidad)],
+    ["Plazo contrato", "60 meses + renovación automática anual"],
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const wsBOM = XLSX.utils.json_to_sheet(bomRows);
+  wsBOM["!cols"] = [
+    {wch:5},{wch:30},{wch:45},{wch:18},{wch:9},{wch:18},{wch:12},
+    {wch:20},{wch:18},{wch:20},{wch:16},{wch:20},{wch:20},{wch:30}
+  ];
+  XLSX.utils.book_append_sheet(wb, wsBOM, "BOM — Materiales");
+
+  const wsRes = XLSX.utils.aoa_to_sheet(resumen);
+  wsRes["!cols"] = [{wch:35},{wch:40}];
+  XLSX.utils.book_append_sheet(wb, wsRes, "Resumen Financiero");
+
+  const filename = `BOM_USS_${(form.name||"Cliente").replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`;
+  XLSX.writeFile(wb, filename);
+}
+
+
 
 export default function App(){
   const [step,setStep]=useState(1);
@@ -314,8 +403,9 @@ export default function App(){
               <button style={s.toggle(model==="oneshot")} onClick={()=>setModel("oneshot")}>1-Shot — Venta directa</button>
               <button style={s.toggle(model==="comodato")} onClick={()=>setModel("comodato")}>Comodato — Abono mensual</button>
             </div>
-            <div style={{display:"flex",gap:"10px",justifyContent:"flex-end"}}>
+            <div style={{display:"flex",gap:"10px",justifyContent:"flex-end",flexWrap:"wrap"}}>
               <button style={s.btnSec} onClick={()=>setStep(1)}>← Editar</button>
+              <button style={{...s.btnSec,color:"#4a9050",borderColor:"#1a3d1a",background:"#0c1f0e"}} onClick={()=>downloadBOM({products,labor,tc,markup,form,calc,qnum})}>📊 Descargar BOM</button>
               <button style={s.btn} onClick={()=>setStep(4)}>Ver cotización →</button>
             </div>
           </div>
