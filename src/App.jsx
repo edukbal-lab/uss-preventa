@@ -1,5 +1,6 @@
 import * as XLSX from "xlsx";
 import { useState, useEffect } from "react";
+import { supabase } from "./supabase.js";
 
 const API_CATALOG = [
   {"sku":"DS-2CD1021G0-I(2.8mm)","cat":"Cámaras IP","desc":"Cámara bala fija 2MP","usd":25.6},
@@ -168,11 +169,97 @@ export default function App(){
   const [loadMsg,setLoadMsg]=useState("");
   const [err,setErr]=useState("");
   const [qnum]=useState(()=>`USS-${new Date().getFullYear()}-${String(Math.floor(Math.random()*9000)+1000)}`);
+  const [savedId,setSavedId]=useState(null);
+  const [saveStatus,setSaveStatus]=useState(""); // "saving" | "saved" | "error"
+  const [showUploader,setShowUploader]=useState(false);
+  const [uploadStatus,setUploadStatus]=useState("");
 
   useEffect(()=>{
     fetch("https://dolarapi.com/v1/dolares/blue")
       .then(r=>r.json()).then(d=>{setTc(d.venta);setTcFetched(true);}).catch(()=>{});
   },[]);
+
+  // ── Guardar cotización en Supabase ────────────────────────────────
+  async function saveCotizacion(calcData, modelName) {
+    setSaveStatus("saving");
+    try {
+      const { data, error } = await supabase.from("cotizaciones").insert([{
+        numero: qnum,
+        cliente_nombre: form.name,
+        cliente_cuit: form.cuit,
+        cliente_direccion: form.address,
+        lugar_instalacion: form.site || form.address,
+        contacto: form.contact,
+        vendedor: form.seller,
+        rubro: form.rubro,
+        soluciones: form.sols,
+        descripcion: form.desc,
+        modelo: modelName,
+        productos: products,
+        labor_tecnicos: labor.technicians,
+        labor_dias: labor.days,
+        hw_usd: calcData.hwUSD,
+        costo_ars: calcData.cost,
+        total_ars: calcData.total,
+        pago_inicial_ars: calcData.pagoInicial,
+        cuota_mensual_ars: calcData.cuota,
+        tc: tc,
+        markup: markup,
+        estado: "borrador"
+      }]).select();
+      if (error) throw error;
+      setSavedId(data[0].id);
+      setSaveStatus("saved");
+    } catch(e) {
+      console.error(e);
+      setSaveStatus("error");
+    }
+  }
+
+  // ── Uploader de lista de precios ──────────────────────────────────
+  async function handlePriceUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploadStatus("Leyendo archivo...");
+    try {
+      const data = await file.arrayBuffer();
+      const wb = XLSX.read(data);
+      const ws = wb.Sheets["MPS"] || wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws);
+
+      setUploadStatus(`Procesando ${rows.length} filas...`);
+
+      const productos = rows
+        .filter(r => r["HDN&HSP Black(USD)"] > 0 && r["Sales Status"] !== "EOL-Final")
+        .map(r => ({
+          sku: String(r["SKU (Código de Producto)"] || r["SKU BASE"] || ""),
+          descripcion: String(r["Basic Product Name"] || r["3-Line-Offer"] || ""),
+          categoria: String(r["1-CAT Madre"] || ""),
+          linea: String(r["2-Cat-Line"] || ""),
+          precio_usd: parseFloat(r["HDN&HSP Black(USD)"]) || 0,
+          estado: String(r["Sales Status"] || ""),
+          proveedor: "HDN",
+          actualizado_en: new Date().toISOString()
+        }))
+        .filter(p => p.sku && p.precio_usd > 0);
+
+      setUploadStatus(`Subiendo ${productos.length} productos a Supabase...`);
+
+      // Upsert en lotes de 500
+      const chunkSize = 500;
+      for (let i = 0; i < productos.length; i += chunkSize) {
+        const chunk = productos.slice(i, i + chunkSize);
+        const { error } = await supabase.from("productos").upsert(chunk, { onConflict: "sku" });
+        if (error) throw error;
+        setUploadStatus(`Subiendo... ${Math.min(i + chunkSize, productos.length)}/${productos.length}`);
+      }
+
+      setUploadStatus(`✓ ${productos.length} productos actualizados correctamente`);
+    } catch(err) {
+      console.error(err);
+      setUploadStatus("✗ Error: " + err.message);
+    }
+  }
 
   const RUBROS=["Comercio","Edificio","Fábrica","Depósito","Logística","Oficinas","Restaurant","Distribuidora","Centro de salud","Otro"];
   const SOLS=["CCTV","Control de Acceso","Alarma","Detección de Incendio"];
@@ -412,9 +499,15 @@ export default function App(){
         </>}
 
         {step===4&&calc&&<>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px",flexWrap:"wrap",gap:"10px"}}>
             <button style={s.btnSec} onClick={()=>setStep(3)}>← Volver</button>
-            <button style={s.btn} onClick={()=>window.print()}>🖨 Imprimir / Guardar PDF</button>
+            <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
+              {saveStatus==="" && <button style={{...s.btnSec,color:"#4a9050",borderColor:"#1a3d1a",background:"#0c1f0e"}} onClick={()=>saveCotizacion(calc,model)}>💾 Guardar en base de datos</button>}
+              {saveStatus==="saving" && <span style={{fontSize:"13px",color:"#7a9ab5"}}>Guardando...</span>}
+              {saveStatus==="saved" && <span style={{fontSize:"13px",color:"#4a9050"}}>✓ Guardado en Supabase</span>}
+              {saveStatus==="error" && <span style={{fontSize:"13px",color:"#f08080"}}>✗ Error al guardar</span>}
+              <button style={s.btn} onClick={()=>window.print()}>🖨 Imprimir / Guardar PDF</button>
+            </div>
           </div>
 
           <div style={{background:"#fff",color:"#111",borderRadius:"10px",padding:"30px",fontSize:"13px",lineHeight:"1.65"}}>
@@ -503,6 +596,24 @@ export default function App(){
           </div>
           <style>{`@media print{body{background:#fff!important}}`}</style>
         </>}
+
+        {/* ── UPLOADER PANEL ─── */}
+        <div style={{marginTop:"32px",borderTop:`1px solid ${C.border}`,paddingTop:"20px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
+            <div style={{fontSize:"12px",fontWeight:"700",color:C.muted,letterSpacing:"0.08em",textTransform:"uppercase"}}>Administración</div>
+            <button style={s.btnSec} onClick={()=>setShowUploader(u=>!u)}>{showUploader?"Ocultar":"⚙ Actualizar lista de precios"}</button>
+          </div>
+          {showUploader&&<div style={{...s.card,borderColor:"#1e3d1e",background:"#0c1f0e"}}>
+            <div style={{fontSize:"12px",fontWeight:"700",color:"#4a9050",marginBottom:"10px",textTransform:"uppercase",letterSpacing:"0.07em"}}>Actualizar catálogo Hikvision</div>
+            <p style={{fontSize:"13px",color:"#7ab87a",marginBottom:"14px",lineHeight:"1.6"}}>
+              Subí el archivo MPS_FULL Excel que descargás de HDN, Wall o Fiesa. El catálogo se actualiza automáticamente en Supabase.
+            </p>
+            <input type="file" accept=".xlsx,.xls" onChange={handlePriceUpload}
+              style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:"6px",padding:"8px",color:C.text,fontSize:"13px",width:"100%",boxSizing:"border-box"}}/>
+            {uploadStatus&&<div style={{marginTop:"12px",fontSize:"13px",color:uploadStatus.startsWith("✓")?"#4a9050":uploadStatus.startsWith("✗")?"#f08080":"#7a9ab5",fontWeight:"600"}}>{uploadStatus}</div>}
+          </div>}
+        </div>
+
       </div>
     </div>
   );
