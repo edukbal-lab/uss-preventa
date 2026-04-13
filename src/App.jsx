@@ -258,24 +258,88 @@ export default function App(){
     try {
       const data = await file.arrayBuffer();
       const wb = XLSX.read(data);
-      const ws = wb.Sheets["MPS"] || wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws);
+      const sheetNames = wb.SheetNames;
 
-      setUploadStatus(`Procesando ${rows.length} filas...`);
+      let productos = [];
 
-      const productos = rows
-        .filter(r => r["HDN&HSP Black(USD)"] > 0 && r["Sales Status"] !== "EOL-Final")
-        .map(r => ({
-          sku: String(r["SKU (Código de Producto)"] || r["SKU BASE"] || ""),
-          descripcion: String(r["Basic Product Name"] || r["3-Line-Offer"] || ""),
-          categoria: String(r["1-CAT Madre"] || ""),
-          linea: String(r["2-Cat-Line"] || ""),
-          precio_usd: parseFloat(r["HDN&HSP Black(USD)"]) || 0,
-          estado: String(r["Sales Status"] || ""),
-          proveedor: "HDN",
-          actualizado_en: new Date().toISOString()
-        }))
-        .filter(p => p.sku && p.precio_usd > 0);
+      // ── Detectar formato HDN (tiene hoja "MPS") ──────────────────
+      if (sheetNames.includes("MPS")) {
+        setUploadStatus("Detectado: formato HDN/Hikvision...");
+        const ws = wb.Sheets["MPS"];
+        const rows = XLSX.utils.sheet_to_json(ws);
+        productos = rows
+          .filter(r => r["HDN&HSP Black(USD)"] > 0 && r["Sales Status"] !== "EOL-Final")
+          .map(r => ({
+            sku: String(r["SKU (Código de Producto)"] || r["SKU BASE"] || ""),
+            descripcion: String(r["Basic Product Name"] || r["3-Line-Offer"] || ""),
+            categoria: String(r["1-CAT Madre"] || ""),
+            linea: String(r["2-Cat-Line"] || ""),
+            precio_usd: parseFloat(r["HDN&HSP Black(USD)"]) || 0,
+            estado: String(r["Sales Status"] || ""),
+            marca: "Hikvision",
+            proveedor: "HDN",
+            actualizado_en: new Date().toISOString()
+          }))
+          .filter(p => p.sku && p.precio_usd > 0);
+
+      // ── Detectar formato Fiesa (hojas por categoría) ──────────────
+      } else {
+        setUploadStatus("Detectado: formato Fiesa...");
+        const securitySheets = ["Video", "Intrusión", "Control de accesos",
+                                 "Sistemas contra Incendios", "Conectividad",
+                                 "Energía", "Todas las categorías"];
+
+        for (const sname of sheetNames) {
+          if (!securitySheets.includes(sname)) continue;
+          const ws = wb.Sheets[sname];
+          const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+
+          // Encontrar fila de encabezado (contiene "Artículo" o "Código EAN")
+          let headerIdx = -1;
+          for (let i = 0; i < rawRows.length; i++) {
+            const row = rawRows[i];
+            if (row && row.some(c => c === "Artículo" || c === "Código EAN")) {
+              headerIdx = i;
+              break;
+            }
+          }
+          if (headerIdx === -1) continue;
+
+          const headers = rawRows[headerIdx];
+          const marcaIdx = headers.indexOf("Marca");
+          const skuIdx = headers.indexOf("Artículo");
+          const descIdx = headers.indexOf("Detalle Categoría");
+          const precioIdx = headers.indexOf("Tu Precio USD (**)");
+          const stockIdx = headers.indexOf("Stock (*)");
+
+          if (skuIdx === -1 || precioIdx === -1) continue;
+
+          // Procesar filas de datos
+          for (let i = headerIdx + 1; i < rawRows.length; i++) {
+            const row = rawRows[i];
+            if (!row || !row[skuIdx] || typeof row[skuIdx] !== "string") continue;
+            const precio = parseFloat(row[precioIdx]);
+            if (!precio || precio <= 0) continue;
+
+            productos.push({
+              sku: String(row[skuIdx]).trim(),
+              descripcion: String(row[descIdx] || "").trim(),
+              categoria: sname,
+              linea: "",
+              precio_usd: precio,
+              estado: row[stockIdx] > 0 ? "En stock" : "Sin stock",
+              marca: marcaIdx >= 0 ? String(row[marcaIdx] || "").trim() : "",
+              proveedor: "Fiesa",
+              actualizado_en: new Date().toISOString()
+            });
+          }
+        }
+      }
+
+      if (productos.length === 0) {
+        setUploadStatus("✗ No se encontraron productos. Verificá el formato del archivo.");
+        return;
+      }
 
       setUploadStatus(`Subiendo ${productos.length} productos a Supabase...`);
 
@@ -288,7 +352,7 @@ export default function App(){
         setUploadStatus(`Subiendo... ${Math.min(i + chunkSize, productos.length)}/${productos.length}`);
       }
 
-      setUploadStatus(`✓ ${productos.length} productos actualizados correctamente`);
+      setUploadStatus(`✓ ${productos.length} productos de ${productos[0]?.proveedor || "proveedor"} actualizados correctamente`);
     } catch(err) {
       console.error(err);
       setUploadStatus("✗ Error: " + err.message);
