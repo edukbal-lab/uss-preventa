@@ -341,6 +341,13 @@ export default function App(){
         return;
       }
 
+      // Deduplicar por SKU — si hay duplicados quedarse con el último
+      const seen = new Map();
+      for (const p of productos) {
+        seen.set(p.sku, p);
+      }
+      productos = Array.from(seen.values());
+
       setUploadStatus(`Subiendo ${productos.length} productos a Supabase...`);
 
       // Upsert en lotes de 500
