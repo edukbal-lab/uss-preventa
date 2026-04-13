@@ -58,15 +58,21 @@ function calcAll({products,labor,tc,markup}){
   const hwUSD = products.reduce((s,p)=>s+p.qty*p.unit_usd,0);
   const hwARS = hwUSD*tc;
   const laborARS = labor.technicians*labor.days*260000;
-  const cost = hwARS+laborARS;
-  const factor = 1+markup/100;
-  const total = cost*factor;
-  const pagoInicial = total*0.3;
-  const saldo = total*0.7;
+  const cost = hwARS+laborARS;                  // costo real sin markup
+  const oneshotTotal = cost*(1+markup/100);     // 1-shot: costo + markup
+  // Comodato: se calcula sobre costo real, sin markup
+  const pagoInicial = cost*0.3;
+  const saldo = cost*0.7;
   const cuota = saldo/6.5;
-  return {hwUSD,hwARS,laborARS,cost,total,margin:total-cost,pagoInicial,saldo,cuota,penalidad:cuota*36};
+  return {
+    hwUSD, hwARS, laborARS, cost,
+    total: oneshotTotal,
+    margin: oneshotTotal-cost,
+    pagoInicial, saldo, cuota,
+    penalidad: cuota*36
+  };
 }
-function downloadBOM({products, labor, tc, markup, form, calc, qnum}) {
+async function downloadBOM({products, labor, tc, markup, form, calc, qnum, supabaseClient}) {
   const dateStr = new Date().toLocaleDateString("es-AR");
 
   const bomRows = products.map((p, i) => ({
@@ -77,8 +83,9 @@ function downloadBOM({products, labor, tc, markup, form, calc, qnum}) {
     "Cantidad":               p.qty,
     "Precio USD (Black)":     p.unit_usd,
     "Total USD":              +(p.qty * p.unit_usd).toFixed(2),
-    "Precio ARS (s/IVA)":    Math.round(p.unit_usd * tc * (1 + markup / 100)),
-    "Total ARS (s/IVA)":     Math.round(p.qty * p.unit_usd * tc * (1 + markup / 100)),
+    "TC ($/USD)":             tc,
+    "Costo Unit. ARS":        Math.round(p.unit_usd * tc),
+    "Costo Total ARS":        Math.round(p.qty * p.unit_usd * tc),
     "Proveedor sugerido":     "Hikvision / HDN",
     "Stock disponible":       "Consultar",
     "Alternativa":            "",
@@ -94,8 +101,9 @@ function downloadBOM({products, labor, tc, markup, form, calc, qnum}) {
     "Cantidad":               1,
     "Precio USD (Black)":     "",
     "Total USD":              "",
-    "Precio ARS (s/IVA)":    Math.round(calc.laborARS * (1 + markup / 100)),
-    "Total ARS (s/IVA)":     Math.round(calc.laborARS * (1 + markup / 100)),
+    "TC ($/USD)":             "",
+    "Costo Unit. ARS":        Math.round(calc.laborARS),
+    "Costo Total ARS":        Math.round(calc.laborARS),
     "Proveedor sugerido":     "USS",
     "Stock disponible":       "Disponible",
     "Alternativa":            "",
@@ -128,7 +136,8 @@ function downloadBOM({products, labor, tc, markup, form, calc, qnum}) {
     ["IVA 21%", Math.round(calc.total * 0.21)],
     ["TOTAL CON IVA", Math.round(calc.total * 1.21)],
     ["", ""],
-    ["─── MODELO COMODATO ───", ""],
+    ["─── MODELO COMODATO (sobre costo real s/markup) ───", ""],
+    ["Base cálculo (costo real)", Math.round(calc.cost)],
     ["Pago inicial (30%)", Math.round(calc.pagoInicial)],
     ["Saldo a amortizar (70%)", Math.round(calc.saldo)],
     ["Cuota mensual s/IVA (÷6.5)", Math.round(calc.cuota)],
@@ -141,7 +150,7 @@ function downloadBOM({products, labor, tc, markup, form, calc, qnum}) {
   const wsBOM = XLSX.utils.json_to_sheet(bomRows);
   wsBOM["!cols"] = [
     {wch:5},{wch:30},{wch:45},{wch:18},{wch:9},{wch:18},{wch:12},
-    {wch:20},{wch:18},{wch:20},{wch:16},{wch:20},{wch:20},{wch:30}
+    {wch:12},{wch:18},{wch:18},{wch:20},{wch:16},{wch:20},{wch:20},{wch:30}
   ];
   XLSX.utils.book_append_sheet(wb, wsBOM, "BOM — Materiales");
 
@@ -151,6 +160,31 @@ function downloadBOM({products, labor, tc, markup, form, calc, qnum}) {
 
   const filename = `BOM_USS_${(form.name||"Cliente").replace(/\s+/g,"_")}_${new Date().toISOString().slice(0,10)}.xlsx`;
   XLSX.writeFile(wb, filename);
+
+  // Guardar en Supabase
+  try {
+    await supabaseClient.from("bom").insert([{
+      cotizacion_numero: qnum,
+      cliente: form.name || "—",
+      vendedor: form.seller || "—",
+      fecha: new Date().toISOString(),
+      tc: tc,
+      markup: markup,
+      items: bomRows,
+      resumen_financiero: {
+        hw_usd: calc.hwUSD,
+        hw_ars: calc.hwARS,
+        labor_ars: calc.laborARS,
+        costo_total: calc.cost,
+        oneshot_total: calc.total,
+        comodato_pago_inicial: calc.pagoInicial,
+        comodato_cuota: calc.cuota,
+        comodato_penalidad: calc.penalidad,
+      }
+    }]);
+  } catch(e) {
+    console.error("Error guardando BOM en Supabase:", e);
+  }
 }
 
 
@@ -492,7 +526,7 @@ export default function App(){
             </div>
             <div style={{display:"flex",gap:"10px",justifyContent:"flex-end",flexWrap:"wrap"}}>
               <button style={s.btnSec} onClick={()=>setStep(1)}>← Editar</button>
-              <button style={{...s.btnSec,color:"#4a9050",borderColor:"#1a3d1a",background:"#0c1f0e"}} onClick={()=>downloadBOM({products,labor,tc,markup,form,calc,qnum})}>📊 Descargar BOM</button>
+              <button style={{...s.btnSec,color:"#4a9050",borderColor:"#1a3d1a",background:"#0c1f0e"}} onClick={()=>downloadBOM({products,labor,tc,markup,form,calc,qnum,supabaseClient:supabase})}>📊 Descargar BOM</button>
               <button style={s.btn} onClick={()=>setStep(4)}>Ver cotización →</button>
             </div>
           </div>
