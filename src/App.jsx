@@ -57,7 +57,11 @@ const todayStr = () => { const d=new Date(); return `${String(d.getDate()).padSt
 function calcAll({products,labor,tc,markup}){
   const hwUSD = products.reduce((s,p)=>s+p.qty*p.unit_usd,0);
   const hwARS = hwUSD*tc;
-  const laborARS = labor.technicians*labor.days*260000;
+  // Si el agente calculó el costo real (horas × valor_hora del form), lo usamos.
+  // Fallback legacy: técnicos × días × $260k (valor histórico pre-agente).
+  const laborARS = labor.costo_total_ars > 0
+    ? labor.costo_total_ars
+    : labor.technicians*labor.days*260000;
   const cost = hwARS+laborARS;                  // costo real sin markup
   const oneshotTotal = cost*(1+markup/100);     // 1-shot: costo + markup
   // Comodato: se calcula sobre costo real, sin markup
@@ -191,9 +195,12 @@ async function downloadBOM({products, labor, tc, markup, form, calc, qnum, supab
 
 export default function App(){
   const [step,setStep]=useState(1);
-  const [form,setForm]=useState({name:"",cuit:"",address:"",site:"",contact:"",seller:"",rubro:"Comercio",sols:["CCTV"],desc:"",infra:""});
+  const [form,setForm]=useState({name:"",cuit:"",address:"",site:"",contact:"",seller:"",valor_hora:"",rubro:"Comercio",sols:["CCTV"],desc:"",infra:""});
+  const [planoFile,setPlanoFile]=useState(null);
+  const [planoPreview,setPlanoPreview]=useState(null);
+  const [planoB64,setPlanoB64]=useState(null);
   const [products,setProducts]=useState([]);
-  const [labor,setLabor]=useState({technicians:1,days:1,justification:""});
+  const [labor,setLabor]=useState({technicians:1,days:1,justification:"",horas_totales:0,valor_hora_ars:0,costo_total_ars:0,categorias:[]});
   const [analysis,setAnalysis]=useState("");
   const [tc,setTc]=useState(1500);
   const [tcFetched,setTcFetched]=useState(false);
@@ -207,6 +214,8 @@ export default function App(){
   const [saveStatus,setSaveStatus]=useState(""); // "saving" | "saved" | "error"
   const [showUploader,setShowUploader]=useState(false);
   const [uploadStatus,setUploadStatus]=useState("");
+  const [hikStatus,setHikStatus]=useState(""); // "" | "loading" | "done" | "error"
+  const [hikResult,setHikResult]=useState(null);
 
   useEffect(()=>{
     fetch("https://dolarapi.com/v1/dolares/blue")
@@ -371,43 +380,84 @@ export default function App(){
   const toggleSol=(s)=>setForm(f=>({...f,sols:f.sols.includes(s)?f.sols.filter(x=>x!==s):[...f.sols,s]}));
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
 
-  async function generate(){
-    if(form.desc.length<15){setErr("Describí la necesidad del cliente (mínimo 15 caracteres).");return;}
-    setErr("");setLoading(true);setStep(2);
-    const msgs=["Analizando requerimientos...","Buscando proyectos similares en USS...","Seleccionando equipamiento Hikvision...","Estimando mano de obra...","Armando propuesta..."];
-    let mi=0; setLoadMsg(msgs[0]);
-    const iv=setInterval(()=>{mi=(mi+1)%msgs.length;setLoadMsg(msgs[mi]);},1800);
+  function handlePlano(e){
+    const file=e.target.files[0];
+    if(!file)return;
+    setPlanoFile(file);
+    setPlanoPreview(URL.createObjectURL(file));
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const b64=reader.result.split(",")[1];
+      setPlanoB64(b64);
+    };
+    reader.readAsDataURL(file);
+  }
 
-    const similar=PROJECTS.filter(p=>p.r.toLowerCase().includes(form.rubro.toLowerCase().slice(0,5))).slice(0,3);
-    const catFilter=API_CATALOG.filter(p=>
-      (form.sols.includes("CCTV")&&(p.cat==="Cámaras IP"||p.cat==="Cámaras Analógicas"))||
-      (form.sols.includes("Control de Acceso")&&p.cat==="Control de Acceso")||
-      (form.sols.includes("Alarma")&&p.cat==="Alarmas")
-    );
-
+  async function launchHikPartner(){
+    if(!planoB64){setHikStatus("error");setHikResult({notes:"Subí un plano en el paso 1 para usar Hik-Partner Pro."});return;}
+    setHikStatus("loading");setHikResult(null);
     try{
-      // Llamamos a nuestra API route en Vercel — la API key nunca sale del servidor
-      const res = await fetch("/api/chat", {
+      const res=await fetch("/api/hikpartner",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
-          model:"claude-sonnet-4-20250514",
-          max_tokens:1200,
-          system:`Eres el asistente de preventa de USS Seguridad Electrónica, integrador B2B argentino. Seleccioná equipamiento Hikvision del catálogo y estimá mano de obra. Respondé SOLO con JSON válido sin markdown:\n{"analysis":"2-3 oraciones","products":[{"sku":"","desc":"","qty":1,"unit_usd":0,"reason":""}],"labor":{"technicians":1,"days":1,"justification":""}}`,
-          messages:[{role:"user",content:`Cliente: ${form.name||"Sin nombre"}\nRubro: ${form.rubro}\nInstalación: ${form.site||form.address||"No especificado"}\nSoluciones: ${form.sols.join(", ")}\nNecesidad: ${form.desc}\nInfraestructura: ${form.infra||"No especificada"}\n\nCATÁLOGO DISPONIBLE:\n${JSON.stringify(catFilter)}\n\nPROYECTOS SIMILARES GANADOS (referencia):\n${JSON.stringify(similar)}`}]
+          plano_b64:planoB64,
+          plano_mime:planoFile?.type||"image/png",
+          products,
+          site_info:`${form.site||form.address||"Sin dirección"} — ${form.rubro} — ${form.desc}`
         })
       });
       const data=await res.json();
-      const txt=data.content?.map(c=>c.text||"").join("").trim().replace(/```json|```/g,"").trim();
-      const parsed=JSON.parse(txt);
+      if(data.error){setHikStatus("error");setHikResult({notes:data.error});return;}
+      setHikResult(data);setHikStatus("done");
+    }catch(e){
+      setHikStatus("error");setHikResult({notes:"Error de conexión con el servicio de diseño."});
+    }
+  }
+
+  async function generate(){
+    if(form.desc.length<15){setErr("Describí la necesidad del cliente (mínimo 15 caracteres).");return;}
+    if(!form.valor_hora||Number(form.valor_hora)<=0){setErr("Ingresá el valor hora del técnico en el paso 1.");return;}
+    setErr("");setLoading(true);setStep(2);
+    const msgs=["Buscando proyectos similares en USS...","Consultando catálogo Fiesa...","Diseñando BOM basado en histórico...","Estimando horas de mano de obra...","Armando propuesta..."];
+    let mi=0; setLoadMsg(msgs[0]);
+    const iv=setInterval(()=>{mi=(mi+1)%msgs.length;setLoadMsg(msgs[mi]);},1800);
+
+    try{
+      // El orquestador server-side (/api/agent) hace: Supabase histórico + catálogo + Claude
+      const res = await fetch("/api/agent", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          form,
+          planoB64: planoB64 || null,
+          planoMime: planoFile?.type || null,
+        })
+      });
+      const data=await res.json();
       clearInterval(iv);
-      setAnalysis(parsed.analysis||"");
-      setProducts(parsed.products||[]);
-      setLabor(parsed.labor||{technicians:1,days:1,justification:""});
+      if(!res.ok||data.error){
+        setErr(data.error||"Error al conectar con el agente.");
+        setLoading(false);setStep(1);
+        return;
+      }
+      setAnalysis(data.analysis||"");
+      setProducts(data.products||[]);
+      // Mapear la labor nueva (horas por categoría + costo real) al shape legacy
+      const horas = Number(data.labor?.horas_totales)||0;
+      setLabor({
+        technicians: 1,
+        days: Math.max(1, Math.ceil(horas/8)),
+        justification: data.labor?.justification || "",
+        horas_totales: horas,
+        valor_hora_ars: Number(data.labor?.valor_hora_ars) || Number(form.valor_hora) || 0,
+        costo_total_ars: Number(data.labor?.costo_total_ars) || 0,
+        categorias: data.labor?.categorias || [],
+      });
       setLoading(false);setStep(3);
     }catch(e){
       clearInterval(iv);
-      setErr("Error al conectar con el agente. Verificá la API key en Vercel.");
+      setErr("Error al conectar con el agente. Verificá la conexión.");
       setLoading(false);setStep(1);
     }
   }
@@ -469,6 +519,7 @@ export default function App(){
               <div><label style={s.lbl}>Lugar de instalación</label><input style={s.inp} value={form.site} onChange={e=>upd("site",e.target.value)} placeholder="Si difiere del domicilio"/></div>
               <div><label style={s.lbl}>Contacto</label><input style={s.inp} value={form.contact} onChange={e=>upd("contact",e.target.value)} placeholder="Nombre y cargo"/></div>
               <div><label style={s.lbl}>Vendedor USS</label><input style={s.inp} value={form.seller} onChange={e=>upd("seller",e.target.value)} placeholder="Tu nombre"/></div>
+              <div><label style={s.lbl}>Valor hora técnico (ARS) *</label><input style={s.inp} type="number" min="0" step="100" value={form.valor_hora} onChange={e=>upd("valor_hora",e.target.value)} placeholder="Ej: 15000"/></div>
             </div>
           </div>
 
@@ -494,11 +545,32 @@ export default function App(){
               <label style={s.lbl}>Infraestructura (opcional)</label>
               <textarea style={{...s.ta,minHeight:"55px"}} value={form.infra} onChange={e=>upd("infra",e.target.value)} placeholder="Internet, cableado existente, dimensiones, pisos..."/>
             </div>
+            <div style={{marginTop:"10px"}}>
+              <label style={s.lbl}>Plano del sitio (opcional)</label>
+              <input type="file" accept="image/*,.pdf" onChange={handlePlano}
+                style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:"6px",padding:"8px",color:C.text,fontSize:"13px",width:"100%",boxSizing:"border-box"}}/>
+              {planoPreview&&<div style={{marginTop:"10px",position:"relative",display:"inline-block"}}>
+                <img src={planoPreview} alt="Plano" style={{maxHeight:"160px",borderRadius:"6px",border:`1px solid ${C.border}`}}/>
+                <button onClick={()=>{setPlanoFile(null);setPlanoPreview(null);setPlanoB64(null);}} style={{position:"absolute",top:"-6px",right:"-6px",background:C.accent,color:"#fff",border:"none",borderRadius:"50%",width:"22px",height:"22px",fontSize:"14px",cursor:"pointer",lineHeight:"22px",textAlign:"center"}}>×</button>
+              </div>}
+            </div>
           </div>
           <div style={{textAlign:"right"}}>
-            <button style={{...s.btn,opacity:form.desc.length<15?0.45:1}} onClick={generate} disabled={form.desc.length<15}>
-              Generar propuesta →
-            </button>
+            {(() => {
+              const missing = [];
+              if (!form.name.trim()) missing.push("Cliente");
+              if (!form.valor_hora || Number(form.valor_hora) <= 0) missing.push("Valor hora técnico");
+              if (form.desc.length < 15) missing.push("Descripción");
+              const disabled = missing.length > 0;
+              return (
+                <>
+                  {disabled && <div style={{fontSize:"11px",color:C.muted,marginBottom:"6px"}}>Falta completar: {missing.join(", ")}</div>}
+                  <button style={{...s.btn,opacity:disabled?0.45:1}} onClick={generate} disabled={disabled}>
+                    Generar propuesta →
+                  </button>
+                </>
+              );
+            })()}
           </div>
         </>}
 
@@ -545,12 +617,33 @@ export default function App(){
           <div style={s.g2}>
             <div style={s.card}>
               <div style={s.secTitle}>Mano de obra</div>
-              <div style={s.g2}>
-                <div><label style={s.lbl}>Técnicos</label><input type="number" min="1" style={s.inp} value={labor.technicians} onChange={e=>setLabor(l=>({...l,technicians:parseInt(e.target.value)||1}))}/></div>
-                <div><label style={s.lbl}>Días</label><input type="number" min="1" style={s.inp} value={labor.days} onChange={e=>setLabor(l=>({...l,days:parseInt(e.target.value)||1}))}/></div>
-              </div>
+              {labor.horas_totales>0?(
+                <>
+                  <div style={{fontSize:"12px",color:C.muted,marginBottom:"8px"}}>Estimación basada en histórico USS · Valor hora: <strong style={{color:C.text}}>${Number(labor.valor_hora_ars).toLocaleString("es-AR")}</strong></div>
+                  {(labor.categorias||[]).length>0&&(
+                    <div style={{fontSize:"12px",marginBottom:"8px"}}>
+                      {labor.categorias.map((c,i)=>(
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",color:C.muted}}>
+                          <span>{c.nombre}: {c.horas}hs</span>
+                          <span style={{color:C.text}}>{fmt(Number(c.subtotal_ars)||0)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{fontSize:"13px",color:C.muted,paddingTop:"8px",borderTop:`1px solid ${C.border}`}}>
+                    Total: <strong style={{color:C.accent}}>{labor.horas_totales}hs · {fmt(labor.costo_total_ars||calc.laborARS)}</strong>
+                  </div>
+                </>
+              ):(
+                <>
+                  <div style={s.g2}>
+                    <div><label style={s.lbl}>Técnicos</label><input type="number" min="1" style={s.inp} value={labor.technicians} onChange={e=>setLabor(l=>({...l,technicians:parseInt(e.target.value)||1}))}/></div>
+                    <div><label style={s.lbl}>Días</label><input type="number" min="1" style={s.inp} value={labor.days} onChange={e=>setLabor(l=>({...l,days:parseInt(e.target.value)||1}))}/></div>
+                  </div>
+                  <div style={{marginTop:"9px",fontSize:"13px",color:C.muted}}>Total MO: <strong style={{color:C.text}}>{fmt(calc.laborARS)}</strong></div>
+                </>
+              )}
               {labor.justification&&<div style={{fontSize:"11px",color:C.muted,marginTop:"9px",fontStyle:"italic"}}>{labor.justification}</div>}
-              <div style={{marginTop:"9px",fontSize:"13px",color:C.muted}}>Total MO: <strong style={{color:C.text}}>{fmt(calc.laborARS)}</strong></div>
             </div>
             <div style={s.card}>
               <div style={s.secTitle}>Variables</div>
@@ -567,7 +660,9 @@ export default function App(){
             <div style={{marginBottom:"16px"}}>
               {[
                 [`Hardware (${fmtUSD(calc.hwUSD)} × $${tc.toLocaleString("es-AR")})`,fmt(calc.hwARS)],
-                [`Mano de obra (${labor.technicians}t × ${labor.days}d × $260.000)`,fmt(calc.laborARS)],
+                [labor.horas_totales>0
+                  ?`Mano de obra (${labor.horas_totales}hs × $${Number(labor.valor_hora_ars).toLocaleString("es-AR")})`
+                  :`Mano de obra (${labor.technicians}t × ${labor.days}d × $260.000)`,fmt(calc.laborARS)],
                 ["Costo total",fmt(calc.cost)],
               ].map(([k,v],i)=><div key={i} style={{...s.row,fontWeight:i===2?"700":"400"}}><span style={{color:i<2?C.muted:C.text}}>{k}</span><span>{v}</span></div>)}
             </div>
@@ -598,9 +693,27 @@ export default function App(){
             <div style={{display:"flex",gap:"10px",justifyContent:"flex-end",flexWrap:"wrap"}}>
               <button style={s.btnSec} onClick={()=>setStep(1)}>← Editar</button>
               <button style={{...s.btnSec,color:"#4a9050",borderColor:"#1a3d1a",background:"#0c1f0e"}} onClick={()=>downloadBOM({products,labor,tc,markup,form,calc,qnum,supabaseClient:supabase})}>📊 Descargar BOM</button>
+              <button style={{...s.btnSec,color:"#3b82f6",borderColor:"#1e3a5f",background:"#0c1a2e"}} onClick={launchHikPartner} disabled={hikStatus==="loading"}>
+                {hikStatus==="loading"?"⏳ Diseñando...":"🏗 Hik-Partner Pro"}
+              </button>
               <button style={s.btn} onClick={()=>setStep(4)}>Ver cotización →</button>
             </div>
           </div>
+
+          {hikStatus&&<div style={{...s.card,borderColor:hikStatus==="done"?"#1e3a5f":hikStatus==="error"?"#5f1e1e":"#1e3a5f",background:hikStatus==="error"?"#200a0a":"#0c1a2e"}}>
+            <div style={{fontSize:"11px",fontWeight:"700",color:hikStatus==="done"?"#3b82f6":hikStatus==="error"?"#f08080":"#3b82f6",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:"7px"}}>
+              {hikStatus==="loading"?"⏳ Diseñando en Hik-Partner Pro...":hikStatus==="done"?"✓ Diseño Hik-Partner Pro":"✗ Hik-Partner Pro"}
+            </div>
+            {hikStatus==="loading"&&<div style={{fontSize:"13px",color:"#7a9ab5"}}>El agente está abriendo Hik-Partner Pro y ubicando los dispositivos en el plano...</div>}
+            {hikResult&&<>
+              {hikResult.design_summary&&<div style={{fontSize:"13px",color:hikStatus==="error"?"#f08080":"#93b4d4",lineHeight:"1.65",marginBottom:"8px"}}>{hikResult.design_summary}</div>}
+              {hikResult.devices_placed&&<div style={{fontSize:"12px",color:"#7a9ab5"}}>Dispositivos ubicados: <strong style={{color:"#3b82f6"}}>{hikResult.devices_placed}</strong></div>}
+              {hikResult.notes&&<div style={{fontSize:"12px",color:"#7a9ab5",marginTop:"4px",fontStyle:"italic"}}>{hikResult.notes}</div>}
+              {hikResult.screenshot_b64&&<div style={{marginTop:"12px"}}>
+                <img src={`data:image/png;base64,${hikResult.screenshot_b64}`} alt="Diseño Hik-Partner Pro" style={{width:"100%",borderRadius:"6px",border:"1px solid #1e3a5f"}}/>
+              </div>}
+            </>}
+          </div>}
         </>}
 
         {step===4&&calc&&<>
