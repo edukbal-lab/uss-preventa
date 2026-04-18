@@ -394,15 +394,14 @@ export default function App(){
   }
 
   async function launchHikPartner(){
-    if(!planoB64){setHikStatus("error");setHikResult({notes:"Subí un plano en el paso 1 para usar Hik-Partner Pro."});return;}
     setHikStatus("loading");setHikResult(null);
     try{
       const res=await fetch("/api/hikpartner",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
-          plano_b64:planoB64,
-          plano_mime:planoFile?.type||"image/png",
+          plano_b64: planoB64 || "",
+          plano_mime: planoFile?.type || "image/png",
           products,
           site_info:`${form.site||form.address||"Sin dirección"} — ${form.rubro} — ${form.desc}`
         })
@@ -617,32 +616,38 @@ export default function App(){
           <div style={s.g2}>
             <div style={s.card}>
               <div style={s.secTitle}>Mano de obra</div>
-              {labor.horas_totales>0?(
-                <>
-                  <div style={{fontSize:"12px",color:C.muted,marginBottom:"8px"}}>Estimación basada en histórico USS · Valor hora: <strong style={{color:C.text}}>${Number(labor.valor_hora_ars).toLocaleString("es-AR")}</strong></div>
-                  {(labor.categorias||[]).length>0&&(
-                    <div style={{fontSize:"12px",marginBottom:"8px"}}>
-                      {labor.categorias.map((c,i)=>(
-                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"3px 0",color:C.muted}}>
-                          <span>{c.nombre}: {c.horas}hs</span>
-                          <span style={{color:C.text}}>{fmt(Number(c.subtotal_ars)||0)}</span>
-                        </div>
-                      ))}
+              {(labor.categorias||[]).length>0&&(
+                <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:"6px",padding:"10px",marginBottom:"12px"}}>
+                  <div style={{fontSize:"10px",color:"#4a9050",fontWeight:"700",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:"6px"}}>✓ Estimación del agente</div>
+                  {labor.categorias.map((c,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",fontSize:"12px",color:C.muted}}>
+                      <span>{c.nombre}: {c.horas}hs</span>
+                      <span style={{color:C.text}}>{fmt(Number(c.subtotal_ars)||0)}</span>
                     </div>
-                  )}
-                  <div style={{fontSize:"13px",color:C.muted,paddingTop:"8px",borderTop:`1px solid ${C.border}`}}>
-                    Total: <strong style={{color:C.accent}}>{labor.horas_totales}hs · {fmt(labor.costo_total_ars||calc.laborARS)}</strong>
-                  </div>
-                </>
-              ):(
-                <>
-                  <div style={s.g2}>
-                    <div><label style={s.lbl}>Técnicos</label><input type="number" min="1" style={s.inp} value={labor.technicians} onChange={e=>setLabor(l=>({...l,technicians:parseInt(e.target.value)||1}))}/></div>
-                    <div><label style={s.lbl}>Días</label><input type="number" min="1" style={s.inp} value={labor.days} onChange={e=>setLabor(l=>({...l,days:parseInt(e.target.value)||1}))}/></div>
-                  </div>
-                  <div style={{marginTop:"9px",fontSize:"13px",color:C.muted}}>Total MO: <strong style={{color:C.text}}>{fmt(calc.laborARS)}</strong></div>
-                </>
+                  ))}
+                </div>
               )}
+              <div style={s.g2}>
+                <div><label style={s.lbl}>Técnicos</label><input type="number" min="1" style={s.inp} value={labor.technicians} onChange={e=>{
+                  const v=parseInt(e.target.value)||1;
+                  setLabor(l=>{const horas=v*l.days*8;return{...l,technicians:v,horas_totales:horas,costo_total_ars:horas*(l.valor_hora_ars||0)};});
+                }}/></div>
+                <div><label style={s.lbl}>Días</label><input type="number" min="1" style={s.inp} value={labor.days} onChange={e=>{
+                  const v=parseInt(e.target.value)||1;
+                  setLabor(l=>{const horas=l.technicians*v*8;return{...l,days:v,horas_totales:horas,costo_total_ars:horas*(l.valor_hora_ars||0)};});
+                }}/></div>
+                <div><label style={s.lbl}>Horas totales</label><input type="number" min="0" style={s.inp} value={labor.horas_totales||0} onChange={e=>{
+                  const v=parseFloat(e.target.value)||0;
+                  setLabor(l=>({...l,horas_totales:v,costo_total_ars:v*(l.valor_hora_ars||0)}));
+                }}/></div>
+                <div><label style={s.lbl}>Valor hora (ARS)</label><input type="number" min="0" style={s.inp} value={labor.valor_hora_ars||0} onChange={e=>{
+                  const v=parseFloat(e.target.value)||0;
+                  setLabor(l=>({...l,valor_hora_ars:v,costo_total_ars:(l.horas_totales||0)*v}));
+                }}/></div>
+              </div>
+              <div style={{marginTop:"10px",fontSize:"13px",color:C.muted,paddingTop:"8px",borderTop:`1px solid ${C.border}`}}>
+                Total MO: <strong style={{color:C.accent}}>{labor.horas_totales||0}hs · {fmt(calc.laborARS)}</strong>
+              </div>
               {labor.justification&&<div style={{fontSize:"11px",color:C.muted,marginTop:"9px",fontStyle:"italic"}}>{labor.justification}</div>}
             </div>
             <div style={s.card}>

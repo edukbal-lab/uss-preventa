@@ -16,9 +16,8 @@ export default async function handler(req, res) {
 
   const { plano_b64, plano_mime, products, site_info } = req.body;
 
-  if (!plano_b64) {
-    return res.status(400).json({ error: 'Se requiere un plano para diseñar en Hik-Partner Pro' });
-  }
+  // Ahora el plano es opcional — si no hay, el servidor usa "Select by Product"
+  // en vez de "Select by Designer" y arma la cotización solo con SKUs.
 
   try {
     // Verificar que el servidor esté disponible
@@ -33,7 +32,7 @@ export default async function handler(req, res) {
     const response = await fetch(`${serverUrl}/design`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plano_b64, plano_mime, products, site_info }),
+      body: JSON.stringify({ plano_b64: plano_b64 || "", plano_mime: plano_mime || "image/png", products, site_info }),
     });
 
     const data = await response.json();

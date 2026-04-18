@@ -29,7 +29,7 @@ platform_knowledge = ""  # Aprendizaje acumulado sobre la plataforma
 # ── Modelos ────────────────────────────────────────────────────────────
 
 class DesignRequest(BaseModel):
-    plano_b64: str
+    plano_b64: str = ""                      # Opcional. Si vacío, usa flujo "Select by Product"
     plano_mime: str = "image/png"
     products: list = []
     site_info: str = ""
@@ -210,7 +210,8 @@ def login():
             current = page.url or ""
             is_on_dashboard = "hik-partner.com" in current and (
                 "#/installer" in current or "#/partner" in current or
-                "#/project" in current or "#/home" in current
+                "#/project" in current or "#/home" in current or
+                "#/Product" in current  # editor o Offer List — también significa logueado
             )
             if is_on_dashboard:
                 is_logged_in = True
@@ -459,13 +460,17 @@ def design(req: DesignRequest):
         for p in req.products
     )
 
-    # Guardar plano en disco para upload via file picker
-    plano_ext = "pdf" if "pdf" in req.plano_mime else "png"
-    plano_path = f"/tmp/plano_cliente.{plano_ext}"
-    with open(plano_path, "wb") as f:
-        f.write(base64.b64decode(req.plano_b64))
+    # Guardar plano en disco si vino
+    has_plano = bool(req.plano_b64)
+    plano_path = None
+    if has_plano:
+        plano_ext = "pdf" if "pdf" in req.plano_mime else "png"
+        plano_path = f"/tmp/plano_cliente.{plano_ext}"
+        with open(plano_path, "wb") as f:
+            f.write(base64.b64decode(req.plano_b64))
 
     site_name = f"USS_{time.strftime('%Y%m%d_%H%M%S')}_{req.site_info[:30]}"
+    log(f"modo: {'con plano (Select by Designer)' if has_plano else 'sin plano (Select by Product)'}")
 
     # ── FASE 1: Playwright (gratis) — crear quote + entrar al tab Design ──
     project_id = None
@@ -503,15 +508,17 @@ def design(req: DesignRequest):
             time.sleep(4)
             log(f"en quote: {page.url}")
 
-            # 2-3. Clickear card "Select by Designer" con retry hasta que aparezca el dialog
-            card_loc = page.locator("div.card-item:has-text('Select by Designer')").first
+            # 2-3. Siempre "Select by Designer" (el mismo flujo crea el quote).
+            #      Si no hay plano, en el editor elegiremos "Empty Background" en vez de "Upload Floor Plan".
+            card_text = "Select by Designer"
+            card_loc = page.locator(f"div.card-item:has-text('{card_text}')").first
             dialog = page.locator(".el-dialog:has-text('Create New Quote')").first
             card_opened = False
             for attempt in range(3):
                 try:
                     # Primer intento sin force; si falla la visibility de Playwright, reintentamos con force.
                     card_loc.click(timeout=5000, force=(attempt > 0))
-                    log(f"click card Select by Designer (attempt {attempt}, force={attempt>0})")
+                    log(f"click card {card_text} (attempt {attempt}, force={attempt>0})")
                     try:
                         dialog.wait_for(state="visible", timeout=6000)
                         card_opened = True
@@ -579,53 +586,55 @@ def design(req: DesignRequest):
                 project_id = m.group(1)
                 log(f"project_id={project_id}")
 
-            # 8. Click tab "Design" (default llega en Offer List)
-            time.sleep(2)
-            # Los tabs son probablemente spans/divs con texto. Probamos varios selectores.
-            tab_design = None
-            for sel in [
-                "div.el-tabs__item:has-text('Design')",
-                ".tab-item:has-text('Design')",
-                "[role='tab']:has-text('Design')",
-                "span:has-text('Design'):not(:has-text('Description'))",
-            ]:
-                try:
-                    cand = page.locator(sel).first
-                    if cand.count() > 0:
-                        tab_design = cand
-                        log(f"tab Design encontrado con: {sel}")
-                        break
-                except Exception:
-                    continue
-            if tab_design:
-                try:
-                    tab_design.click(timeout=3000)
-                    log("click tab Design")
-                except Exception as e:
-                    log(f"click tab Design fail: {e}")
+            # 8. Click tab "Design" (solo si hay plano — sin plano vamos directo a Offer List)
+            if has_plano:
+                time.sleep(2)
+                # Los tabs son probablemente spans/divs con texto. Probamos varios selectores.
+                tab_design = None
+                for sel in [
+                    "div.el-tabs__item:has-text('Design')",
+                    ".tab-item:has-text('Design')",
+                    "[role='tab']:has-text('Design')",
+                    "span:has-text('Design'):not(:has-text('Description'))",
+                ]:
+                    try:
+                        cand = page.locator(sel).first
+                        if cand.count() > 0:
+                            tab_design = cand
+                            log(f"tab Design encontrado con: {sel}")
+                            break
+                    except Exception:
+                        continue
+                if tab_design:
+                    try:
+                        tab_design.click(timeout=3000)
+                        log("click tab Design")
+                    except Exception as e:
+                        log(f"click tab Design fail: {e}")
+                else:
+                    # Fallback: navegar directo
+                    if project_id:
+                        page.goto(f"https://isa.hik-partner.com/#/Product/generate/design?id={project_id}",
+                                  wait_until="domcontentloaded", timeout=10000)
+                        time.sleep(2)
+                        log(f"navegación directa a /design?id={project_id}")
             else:
-                # Fallback: navegar directo
-                if project_id:
-                    page.goto(f"https://isa.hik-partner.com/#/Product/generate/design?id={project_id}",
-                              wait_until="domcontentloaded", timeout=10000)
-                    time.sleep(2)
-                    log(f"navegación directa a /design?id={project_id}")
+                log("sin plano — salteamos tab Design, continuamos en Offer List")
 
-            # 9. Esperar que el editor tenga algún elemento funcional (file input oculto, botón de upload,
-            #    o que aparezca iframe del canvas). Hasta 60s.
+            # 9. Wait editor — ambos flujos necesitan esperar a que aparezcan las 3 cards
+            # (Upload Floor Plan / Select A Map / Empty Background). Detectamos por .design-upload-item.
             ready = False
             for i in range(60):
                 probe = page.evaluate("""() => {
+                    const cards = document.querySelectorAll('.design-upload-item').length;
                     const ifc = document.querySelectorAll('iframe').length;
-                    const fic = document.querySelectorAll('input[type=file]').length;
-                    const uploads = document.querySelectorAll('.el-upload, [class*="upload"]:not([class*="uploaded"])').length;
                     const loadingVisible = Array.from(document.querySelectorAll('*')).some(e => {
                         const r = e.getBoundingClientRect();
                         return /^\\s*Loading/i.test(e.innerText||'') && r.width > 50 && r.height > 50 && e.children.length < 3;
                     });
-                    return { ifc, fic, uploads, loadingVisible };
+                    return { cards, ifc, loadingVisible };
                 }""")
-                if probe["fic"] > 0 or probe["uploads"] > 0 or probe["ifc"] > 0 or not probe["loadingVisible"]:
+                if probe["cards"] >= 3 or probe["ifc"] > 0 or not probe["loadingVisible"]:
                     ready = True
                     log(f"editor ready (poll #{i}): probe={probe}")
                     break
@@ -635,12 +644,73 @@ def design(req: DesignRequest):
             if not ready:
                 log(f"editor NO terminó de cargar en 60s — url: {page.url}")
 
-            # 10. Upload plano. Flujo:
-            #  a) Click card "Upload Floor Plan" → abre un modal secundario con drop zone
-            #     + Layout Name + Ceiling Height + Confirm
-            #  b) Dentro del modal hay un input[type=file] oculto; set_input_files sobre él
-            #  c) Click Confirm
-            try:
+            # 10. Con plano: abrir modal Upload Floor Plan. Sin plano: clickear "Empty Background"
+            #     (la card a la derecha en el wizard inicial del editor). Después, ambos flujos
+            #     convergen en Offer List para agregar productos.
+            if not has_plano:
+                try:
+                    # Empty Background card
+                    page.locator(".design-upload-item:has-text('Empty Background')").first.click(timeout=5000)
+                    log("click Empty Background")
+                    time.sleep(2)
+                    # Rellenar campos requeridos (Width, Height, Scale) del dialog Empty Background
+                    # Los inputs del dialog están después del Layout Name (que ya tiene default).
+                    # Usamos Element UI-safe fill vía nativeInputValueSetter.
+                    # Rellenar Width/Height/Scale identificando por LABEL del form-item
+                    # (Element UI renderiza: <div class="el-form-item"><label>Width</label><input></div>)
+                    try:
+                        result = page.evaluate("""() => {
+                            const dialogs = Array.from(document.querySelectorAll('.el-dialog__wrapper, .el-dialog'))
+                                .filter(d => {
+                                    const r = d.getBoundingClientRect();
+                                    return r.width > 100 && r.height > 100 && (d.innerText||'').includes('Empty Background');
+                                });
+                            const dlg = dialogs[dialogs.length - 1];
+                            if (!dlg) return { err: 'no dialog' };
+                            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                            const fillByLabel = (labelText, value) => {
+                                const items = Array.from(dlg.querySelectorAll('.el-form-item, [class*="form-item"]'));
+                                for (const item of items) {
+                                    const lbl = (item.innerText || '').trim();
+                                    if (lbl.startsWith(labelText + ' ') || lbl.startsWith(labelText + '\\n') || lbl === labelText || lbl === labelText + ' *' || lbl.split(/\\s+/)[0] === labelText) {
+                                        const inp = item.querySelector('input:not([readonly])');
+                                        if (inp) {
+                                            inp.focus();
+                                            setter.call(inp, String(value));
+                                            inp.dispatchEvent(new Event('input', {bubbles:true}));
+                                            inp.dispatchEvent(new Event('change', {bubbles:true}));
+                                            inp.blur();
+                                            return { label: labelText, set: inp.value };
+                                        }
+                                    }
+                                }
+                                return { label: labelText, set: null };
+                            };
+                            return {
+                                width: fillByLabel('Width', 2000),
+                                height: fillByLabel('Height', 1500),
+                                scale: fillByLabel('Scale', 100),
+                            };
+                        }""")
+                        log(f"Empty Background fills: {result}")
+                    except Exception as e:
+                        log(f"warning llenando Empty Background: {e}")
+                    time.sleep(1)
+                    # Click Confirm
+                    confirm_btn = page.locator("button:has-text('Confirm'):visible").first
+                    for _ in range(10):
+                        disabled = confirm_btn.evaluate("el => el.disabled || el.classList.contains('is-disabled')")
+                        if not disabled:
+                            break
+                        time.sleep(0.5)
+                    confirm_btn.click(timeout=5000)
+                    log("click Confirm (Empty Background)")
+                    time.sleep(3)
+                except Exception as e:
+                    log(f"Empty Background fail: {type(e).__name__}: {str(e)[:200]}")
+
+            if has_plano:
+              try:
                 # a) abrir el modal
                 page.locator(".design-upload-item:has-text('Upload Floor Plan')").first.click()
                 time.sleep(2)
@@ -658,7 +728,6 @@ def design(req: DesignRequest):
                 log(f"plano set via set_input_files: {plano_path}")
 
                 # Esperar a que el backend complete el multipart upload + conversion.
-                # Detectamos que terminó cuando aparece el call scene/convert/file con 200.
                 upload_done = False
                 for i in range(40):
                     matched = [a for a in api_responses if "survey/scene/convert/file" in a]
@@ -692,14 +761,20 @@ def design(req: DesignRequest):
                         confirm_btn.click(timeout=3000)
                     except Exception:
                         pass
-            except Exception as e:
+              except Exception as e:
                 log(f"upload falló: {type(e).__name__}: {str(e)[:200]}")
 
             # 11. Switch a tab "Offer List" para capturar la cotización auto-generada
             try:
-                offer_tab = page.locator(".generate-tab-item:has-text('Offer List')").first
-                offer_tab.click(timeout=5000)
-                log("click tab Offer List")
+                # Click del tab no siempre dispara navegación en Vue; navegamos directo al URL.
+                if project_id:
+                    page.goto(f"https://isa.hik-partner.com/#/Product/generate/product?id={project_id}",
+                              wait_until="domcontentloaded", timeout=15000)
+                    log(f"navegación directa a Offer List /product?id={project_id}")
+                else:
+                    offer_tab = page.locator(".generate-tab-item:has-text('Offer List')").first
+                    offer_tab.click(timeout=8000, force=True)
+                    log("click tab Offer List (force)")
                 time.sleep(4)  # esperar que cargue la lista
                 # Dump de productos listados
                 offer_data = page.evaluate("""() => {
