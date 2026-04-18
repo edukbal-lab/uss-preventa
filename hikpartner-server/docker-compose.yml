@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  hikpartner-agent:
+    build: .
+    ports:
+      - "8501:8501"    # API del agente
+      - "6080:6080"    # noVNC (monitor visual)
+      - "5900:5900"    # VNC directo
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - HIKPARTNER_USER=${HIKPARTNER_USER}
+      - HIKPARTNER_PASS=${HIKPARTNER_PASS}
+      - DISPLAY=:1
+    shm_size: "2gb"
+    restart: unless-stopped
