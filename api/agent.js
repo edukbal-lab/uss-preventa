@@ -54,16 +54,21 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ── 1. Histórico: proyectos concretados, ranking por similitud ────────
-    const concretados = await sb("proyectos_historicos", {
-      select: "id,lugar,rubro,necesidad,solicitud_elementos,infraestructura,problematica_resolver,periferico,costo_total,instalacion",
-      resultado_comercial: "eq.Concretado",
-      limit: "120",
+    // ── 1. Histórico: TODOS los proyectos (incluyendo perdidos) ranking por similitud.
+    //      Priorizamos concretados pero Claude ve también perdidos como contexto.
+    const historicos = await sb("proyectos_historicos", {
+      select: "id,lugar,rubro,necesidad,solicitud_elementos,infraestructura,problematica_resolver,periferico,costo_total,instalacion,resultado_comercial",
+      limit: "300",
     });
-    const scored = concretados
-      .map(p => ({ p, s: similarityScore(p, form) }))
+    const scored = historicos
+      .map(p => {
+        let s = similarityScore(p, form);
+        // Bump proyectos concretados para que queden priorizados en ties
+        if (p.resultado_comercial === "Concretado") s += 3;
+        return { p, s };
+      })
       .sort((a, b) => b.s - a.s);
-    const topSimilares = scored.slice(0, 5).map(x => ({ ...x.p, _score: x.s }));
+    const topSimilares = scored.slice(0, 10).map(x => ({ ...x.p, _score: x.s }));
     const topIds = topSimilares.map(p => p.id);
 
     // ── 2. Materiales y mano de obra de esos proyectos ─────────────────────
@@ -95,7 +100,7 @@ export default async function handler(req, res) {
     // Filtramos por las soluciones seleccionadas para reducir tokens.
     const catalogo = await sb("productos", {
       select: "sku,descripcion,categoria,linea,precio_usd,proveedor,marca",
-      limit: "400",
+      limit: "800",
     });
     // Pre-filtro simple por categoría relevante al rubro/sols
     const sols = (form.sols || []).map(s => s.toLowerCase());
@@ -103,13 +108,13 @@ export default async function handler(req, res) {
       const cat = (c.categoria || "").toLowerCase();
       if (!sols.length) return true;
       return sols.some(s => {
-        if (s === "cctv") return cat.includes("camara") || cat.includes("cámara") || cat.includes("nvr") || cat.includes("cctv") || cat.includes("video") || cat.includes("switch");
-        if (s === "control de acceso") return cat.includes("acceso") || cat.includes("control");
-        if (s === "alarma") return cat.includes("alarma") || cat.includes("sensor");
-        if (s === "incendio") return cat.includes("incendio") || cat.includes("humo");
+        if (s === "cctv") return cat.includes("camara") || cat.includes("cámara") || cat.includes("nvr") || cat.includes("cctv") || cat.includes("video") || cat.includes("switch") || cat.includes("grabad") || cat.includes("lente") || cat.includes("gabinet") || cat.includes("fuent") || cat.includes("rack") || cat.includes("cable");
+        if (s === "control de acceso") return cat.includes("acceso") || cat.includes("control") || cat.includes("cerrad") || cat.includes("bot") || cat.includes("lector") || cat.includes("tarjeta") || cat.includes("barrera") || cat.includes("molinet") || cat.includes("fuent") || cat.includes("cable");
+        if (s === "alarma") return cat.includes("alarma") || cat.includes("sensor") || cat.includes("sirena") || cat.includes("panel") || cat.includes("bateria") || cat.includes("contacto") || cat.includes("movimiento") || cat.includes("humo");
+        if (s === "incendio") return cat.includes("incendio") || cat.includes("humo") || cat.includes("detector") || cat.includes("sirena") || cat.includes("panel");
         return cat.includes(s);
       });
-    }).slice(0, 250);
+    }).slice(0, 500);
 
     // ── 4. Construir contexto para Claude ─────────────────────────────────
     const similaresResumen = topSimilares.map((p, i) => {
@@ -156,29 +161,39 @@ ${JSON.stringify(catFilter)}`;
     // ── 5. Llamada a Claude ───────────────────────────────────────────────
     const system = `Sos el asistente de preventa de USS Seguridad Electrónica (integrador B2B, Argentina).
 
-Tu tarea: diseñar el BOM y estimar mano de obra del PROYECTO NUEVO, basándote en:
-1) Los proyectos históricos similares que se concretaron (qué equipamiento funcionó, cuántas horas tomó cada categoría).
-2) El catálogo vigente para seleccionar SKUs realistas con precios actuales.
-3) El plano (si fue adjuntado) para dimensionar cantidades.
+Tu tarea: diseñar un BOM COMPLETO y profesional para el PROYECTO NUEVO y estimar mano de obra.
 
-Criterios:
-- Priorizá SKUs que aparezcan en los proyectos históricos similares (son patrones que ya funcionaron).
-- Si hay un SKU histórico que ya no está en el catálogo vigente, buscá el reemplazo equivalente.
-- Las horas de mano de obra se deben proyectar observando la relación horas/envergadura de los proyectos similares. NO inventes horas: usá los datos históricos como ancla.
-- Categorías de mano de obra observadas: B2B (técnico), Ayudante, Project Manager. Si el histórico no muestra una categoría, no la incluyas.
+IMPORTANTE — diseño completo significa NO quedarse corto:
+- Cubrí TODO lo que necesita el proyecto: no solo las cámaras/sensores/lectores, también los elementos de soporte y conexión
+  (NVR/grabador dimensionado a los canales, switch PoE apropiado, rack/gabinete si corresponde, fuentes de alimentación,
+  cables por metro, herrajes, sirenas, contactos magnéticos, panel de alarma, batería de respaldo, etc.).
+- Pensá como un preventa profesional: si vendés 10 cámaras, necesitás 10 cables, PoE suficiente, grabador acorde.
+- Si el plano muestra accesos, incluí elementos para cada uno.
+- Un BOM típico de CCTV tiene 8-25 líneas, no 3-5. Un proyecto mediano de accesos + alarma fácil supera los 15 items.
+
+Fuentes que te doy:
+1) Proyectos históricos similares (concretados Y perdidos). Los concretados son patrones que funcionaron.
+   Usá el BOM histórico como CHECKLIST de qué no olvidarte, pero ampliá si el proyecto nuevo lo pide.
+2) Catálogo vigente con precios Fiesa. Seleccioná SKUs reales del catálogo (no inventes SKUs).
+3) El plano (si adjuntado) para dimensionar cantidades.
+
+Mano de obra:
+- Proyectá horas basándote en la relación horas/envergadura de los proyectos similares.
+- Categorías observadas: B2B (técnico principal), Ayudante, Project Manager, Terciarizado.
+- Devolvé cada categoría con sus horas. NO repitas un monto en ARS — el frontend calcula con el valor/hora del usuario.
 
 Respondé SOLO con JSON válido, sin markdown:
 {
-  "analysis": "2-4 oraciones explicando el criterio del diseño y qué proyectos similares usaste",
+  "analysis": "3-5 oraciones: qué proyectos similares te guiaron y qué criterio usaste para completar el BOM",
   "products": [
     {"sku": "", "desc": "", "qty": 1, "unit_usd": 0, "reason": "por qué este SKU y cantidad"}
   ],
   "labor": {
     "categorias": [
-      {"nombre": "B2B", "horas": 0, "justificacion": "basado en proyecto X del histórico"}
+      {"nombre": "B2B", "horas": 0, "justificacion": "basado en proyecto X"}
     ],
     "horas_totales": 0,
-    "justification": "cómo llegué a las horas totales"
+    "justification": "cómo llegué al total"
   },
   "historicos_referencia": ["id1", "id2"]
 }`;
@@ -192,7 +207,7 @@ Respondé SOLO con JSON válido, sin markdown:
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 3000,
+        max_tokens: 8000,
         system,
         messages: [{ role: "user", content: userContent }],
       }),

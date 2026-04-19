@@ -618,13 +618,15 @@ export default function App(){
               <div style={s.secTitle}>Mano de obra</div>
               {(labor.categorias||[]).length>0&&(
                 <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:"6px",padding:"10px",marginBottom:"12px"}}>
-                  <div style={{fontSize:"10px",color:"#4a9050",fontWeight:"700",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:"6px"}}>✓ Estimación del agente</div>
-                  {labor.categorias.map((c,i)=>(
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",fontSize:"12px",color:C.muted}}>
-                      <span>{c.nombre}: {c.horas}hs</span>
-                      <span style={{color:C.text}}>{fmt(Number(c.subtotal_ars)||0)}</span>
-                    </div>
-                  ))}
+                  <div style={{fontSize:"10px",color:"#4a9050",fontWeight:"700",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:"6px"}}>✓ Distribución sugerida por el agente (referencia)</div>
+                  <div style={{fontSize:"12px",color:C.muted}}>
+                    {labor.categorias.map((c,i)=>(
+                      <span key={i}>
+                        {i>0&&" · "}<strong style={{color:C.text}}>{c.nombre}</strong>: {c.horas}hs
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{fontSize:"10px",color:C.muted,marginTop:"6px",fontStyle:"italic"}}>El total de abajo usa los campos editables — modificá cualquier valor y se recalcula.</div>
                 </div>
               )}
               <div style={s.g2}>
