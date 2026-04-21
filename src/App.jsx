@@ -436,7 +436,10 @@ export default function App(){
       const data=await res.json();
       clearInterval(iv);
       if(!res.ok||data.error){
-        setErr(data.error||"Error al conectar con el agente.");
+        const detail = data.detail
+          ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))
+          : "";
+        setErr((data.error||"Error al conectar con el agente.") + (detail ? ` — ${detail.slice(0,400)}` : ""));
         setLoading(false);setStep(1);
         return;
       }

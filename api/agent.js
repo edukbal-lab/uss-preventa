@@ -246,7 +246,7 @@ Respondé SOLO con JSON válido, sin markdown:
       labor: laborFinal,
       historicos_referencia: plan.historicos_referencia || topIds,
       meta: {
-        proyectos_evaluados: concretados.length,
+        proyectos_evaluados: historicos.length,
         top_similares: topSimilares.map(p => ({ id: p.id, score: p._score, lugar: p.lugar, rubro: p.rubro })),
         catalogo_items: catFilter.length,
       },
