@@ -1,8 +1,11 @@
 #!/bin/bash
 set -e
 
-# Limpiar cache de Chrome (elimina autofill / saved passwords de runs anteriores)
-rm -rf /tmp/chrome-profile
+# Chrome profile persisted via docker volume (/tmp/chrome-profile).
+# No lo borramos en boot para preservar la sesión OneHikID entre restarts.
+# Si hay que resetear, borrar el volume: docker compose down -v
+# Limpiamos singleton locks del container anterior (sin ellos Chrome arranca ok).
+rm -f /tmp/chrome-profile/SingletonCookie /tmp/chrome-profile/SingletonLock /tmp/chrome-profile/SingletonSocket
 
 # Limpiar locks de Xvfb de runs anteriores (sin esto, un restart del docker daemon
 # deja /tmp/.X1-lock y Xvfb falla con "Server is already active for display 1")

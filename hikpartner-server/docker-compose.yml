@@ -4,9 +4,9 @@ services:
   hikpartner-agent:
     build: .
     ports:
-      - "8501:8501"    # API del agente
-      - "6080:6080"    # noVNC (monitor visual)
-      - "5900:5900"    # VNC directo
+      - "127.0.0.1:8501:8501"    # API del agente (solo localhost, Tailscale Funnel lo publica)
+      - "127.0.0.1:6080:6080"    # noVNC (acceso via SSH port-forward)
+      - "127.0.0.1:5900:5900"    # VNC directo
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - HIKPARTNER_USER=${HIKPARTNER_USER}
@@ -14,3 +14,8 @@ services:
       - DISPLAY=:1
     shm_size: "2gb"
     restart: unless-stopped
+    volumes:
+      - chrome-profile:/tmp/chrome-profile
+
+volumes:
+  chrome-profile:
